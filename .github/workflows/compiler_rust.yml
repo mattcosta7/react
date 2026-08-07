@@ -62,6 +62,25 @@ jobs:
       # --- Build & test ---
       - run: cargo check
       - run: cargo build
+      - run: cargo test --workspace
+
+      # The source map provenance suite lives in the babel-plugin-react-compiler
+      # package (the only workspace with a jest harness) but exercises the Rust
+      # backend, so it runs here rather than in the TypeScript workflow, which
+      # has no cargo toolchain. REQUIRE_RUST_BACKEND makes a backend that fails
+      # to load a hard error instead of a skip — without it the suite would
+      # report success while running nothing.
+      - name: Stage Rust native addon
+        run: |
+          cargo build -p react_compiler_napi
+          cp target/debug/libreact_compiler_napi.so \
+            packages/babel-plugin-react-compiler-rust/native/index.node
+      - run: yarn workspace babel-plugin-react-compiler-rust run build
+      - name: Jest source map provenance (Rust backend)
+        run: yarn workspace babel-plugin-react-compiler jest RustSourceMapProvenance
+        env:
+          REQUIRE_RUST_BACKEND: '1'
+
       - run: bash scripts/test-babel-ast.sh
       - run: bash scripts/test-rust-port.sh
       - run: yarn workspace snap run build

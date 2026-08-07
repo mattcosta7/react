@@ -18,7 +18,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use react_compiler_ast::File;
 use react_compiler_ast::Program;
-use react_compiler_ast::common::BaseNode;
+use react_compiler_ast::common::{BaseNode, hir_loc_to_ast};
 use react_compiler_ast::declarations::Declaration;
 use react_compiler_ast::declarations::ExportDefaultDecl;
 use react_compiler_ast::declarations::ExportDefaultDeclaration;
@@ -1180,18 +1180,7 @@ fn get_callee_name_if_react_api(callee: &Expression) -> Option<&str> {
 
 /// Convert an AST SourceLocation to a diagnostics SourceLocation
 fn convert_loc(loc: &react_compiler_ast::common::SourceLocation) -> SourceLocation {
-    SourceLocation {
-        start: react_compiler_diagnostics::Position {
-            line: loc.start.line,
-            column: loc.start.column,
-            index: loc.start.index,
-        },
-        end: react_compiler_diagnostics::Position {
-            line: loc.end.line,
-            column: loc.end.column,
-            index: loc.end.index,
-        },
-    }
+    loc.to_hir()
 }
 
 fn base_node_loc(base: &BaseNode) -> Option<SourceLocation> {
@@ -2634,7 +2623,16 @@ fn apply_compiled_functions(
         // Collect outlined functions for this compiled function
         for outlined in &compiled.codegen_fn.outlined {
             let outlined_decl = FunctionDeclaration {
-                base: BaseNode::typed("FunctionDeclaration"),
+                // An outlined helper stands in for the function expression it
+                // was extracted from, so it inherits that expression's
+                // location. (The TS backend assigns the enclosing component's
+                // entire span here, which makes a frame inside the helper
+                // blame the whole component.)
+                base: {
+                    let mut base = BaseNode::typed("FunctionDeclaration");
+                    base.loc = hir_loc_to_ast(outlined.func.loc);
+                    base
+                },
                 id: outlined.func.id.clone(),
                 params: outlined.func.params.clone(),
                 body: outlined.func.body.clone(),

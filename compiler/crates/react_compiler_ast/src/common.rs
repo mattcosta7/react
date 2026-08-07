@@ -1,3 +1,7 @@
+use react_compiler_diagnostics::{
+    Position as HirPosition, SourceFilename as HirSourceFilename,
+    SourceLocation as HirSourceLocation,
+};
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -119,6 +123,74 @@ pub struct SourceLocation {
     pub identifier_name: Option<String>,
 }
 
+impl SourceLocation {
+    /// Convert this Babel AST location into the HIR representation, preserving
+    /// line, column, byte index, and the originating filename.
+    ///
+    /// This is the ingest direction: the compiler is driven as a Babel plugin,
+    /// so locations start life on the Babel AST that Babel's parser produced.
+    /// This is the single entrypoint for AST -> HIR conversion; do not hand-roll
+    /// partial conversions that drop `index` or `filename`, because whatever is
+    /// lost here cannot be recovered by [`SourceLocation::from_hir`] on the way
+    /// back out.
+    pub fn to_hir(&self) -> HirSourceLocation {
+        HirSourceLocation {
+            start: HirPosition {
+                line: self.start.line,
+                column: self.start.column,
+                index: self.start.index,
+            },
+            end: HirPosition {
+                line: self.end.line,
+                column: self.end.column,
+                index: self.end.index,
+            },
+            filename: self.filename.as_deref().map(HirSourceFilename::new),
+        }
+    }
+
+    /// Materialize a Babel AST location from an HIR location.
+    ///
+    /// This is the emit direction, and the one that determines source map
+    /// quality. The compiler hands its compiled Babel AST back to Babel, which
+    /// splices it into the program and runs its own generator; that generator
+    /// derives the source map purely from the `loc` on each node. So a node
+    /// materialized by codegen only appears in the source map if it goes
+    /// through here with the location of the source construct it represents.
+    ///
+    /// Every codegen site that assigns a location to a materialized node must
+    /// use this so that provenance is never silently truncated.
+    pub fn from_hir(loc: &HirSourceLocation) -> Self {
+        Self {
+            start: Position {
+                line: loc.start.line,
+                column: loc.start.column,
+                index: loc.start.index,
+            },
+            end: Position {
+                line: loc.end.line,
+                column: loc.end.column,
+                index: loc.end.index,
+            },
+            filename: loc.filename.map(|f| f.as_str().to_string()),
+            identifier_name: None,
+        }
+    }
+}
+
+/// Convert an optional AST location into an optional HIR location.
+pub fn ast_loc_to_hir(loc: Option<&SourceLocation>) -> Option<HirSourceLocation> {
+    loc.map(SourceLocation::to_hir)
+}
+
+/// Convert an optional HIR location into an optional AST location.
+///
+/// `None` (i.e. `GeneratedSource`) stays `None`: compiler-only scaffolding must
+/// remain unmapped so that generated frames never blame user code.
+pub fn hir_loc_to_ast(loc: Option<HirSourceLocation>) -> Option<SourceLocation> {
+    loc.as_ref().map(SourceLocation::from_hir)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Comment {
@@ -189,5 +261,93 @@ impl BaseNode {
             node_type: Some(type_name.to_string()),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ast_loc() -> SourceLocation {
+        SourceLocation {
+            start: Position {
+                line: 12,
+                column: 4,
+                index: Some(211),
+            },
+            end: Position {
+                line: 12,
+                column: 27,
+                index: Some(234),
+            },
+            filename: Some("src/Component.jsx".to_string()),
+            identifier_name: None,
+        }
+    }
+
+    /// Whatever `to_hir` drops cannot be recovered on the way back out, so it
+    /// must carry every field. Dropping `index` or `filename` here is silent:
+    /// line and column still look right, so codegen output and snapshot
+    /// fixtures are unchanged while source map provenance is quietly wrong.
+    #[test]
+    fn to_hir_preserves_every_field() {
+        let hir = ast_loc().to_hir();
+
+        assert_eq!(hir.start.line, 12);
+        assert_eq!(hir.start.column, 4);
+        assert_eq!(hir.start.index, Some(211));
+        assert_eq!(hir.end.line, 12);
+        assert_eq!(hir.end.column, 27);
+        assert_eq!(hir.end.index, Some(234));
+        assert_eq!(
+            hir.filename.map(|f| f.as_str().to_string()),
+            Some("src/Component.jsx".to_string())
+        );
+    }
+
+    #[test]
+    fn ast_to_hir_to_ast_round_trips() {
+        let original = ast_loc();
+        let result = SourceLocation::from_hir(&original.to_hir());
+
+        assert_eq!(result.start.line, original.start.line);
+        assert_eq!(result.start.column, original.start.column);
+        assert_eq!(result.start.index, original.start.index);
+        assert_eq!(result.end.line, original.end.line);
+        assert_eq!(result.end.column, original.end.column);
+        assert_eq!(result.end.index, original.end.index);
+        assert_eq!(result.filename, original.filename);
+    }
+
+    #[test]
+    fn locations_without_index_or_filename_round_trip_as_none() {
+        let sparse = SourceLocation {
+            start: Position {
+                line: 1,
+                column: 0,
+                index: None,
+            },
+            end: Position {
+                line: 1,
+                column: 5,
+                index: None,
+            },
+            filename: None,
+            identifier_name: None,
+        };
+
+        let result = SourceLocation::from_hir(&sparse.to_hir());
+
+        assert_eq!(result.start.index, None);
+        assert_eq!(result.end.index, None);
+        assert_eq!(result.filename, None);
+    }
+
+    /// `None` means `GeneratedSource`. Compiler-only scaffolding relies on this
+    /// staying `None` so that generated frames never blame user code.
+    #[test]
+    fn generated_source_stays_unmapped_in_both_directions() {
+        assert!(ast_loc_to_hir(None).is_none());
+        assert!(hir_loc_to_ast(None).is_none());
     }
 }

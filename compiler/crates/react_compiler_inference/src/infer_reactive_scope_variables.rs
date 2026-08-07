@@ -165,6 +165,7 @@ fn merge_location(l: Option<SourceLocation>, r: Option<SourceLocation>) -> Optio
                     (a, b) => a.or(b),
                 },
             },
+            filename: l.filename.or(r.filename),
         }),
     }
 }

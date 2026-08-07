@@ -218,6 +218,7 @@ fn name_anonymous_functions_impl(func: &HirFunction, env: &Environment) -> Vec<N
                             JsxAttribute::Attribute {
                                 name: attr_name,
                                 place,
+                                ..
                             } => {
                                 if let Some(&node_idx) = functions.get(&place.identifier) {
                                     let node = &mut nodes[node_idx];

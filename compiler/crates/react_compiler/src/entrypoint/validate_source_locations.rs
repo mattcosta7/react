@@ -21,7 +21,7 @@ use react_compiler_ast::expressions::{
 use react_compiler_ast::patterns::PatternLike;
 use react_compiler_ast::statements::{ForInOfLeft, ForInit, Statement, VariableDeclaration};
 use react_compiler_diagnostics::{
-    CompilerDiagnostic, CompilerDiagnosticDetail, ErrorCategory, Position as DiagPosition,
+    CompilerDiagnostic, CompilerDiagnosticDetail, ErrorCategory,
     SourceLocation as DiagSourceLocation,
 };
 use react_compiler_hir::environment::Environment;
@@ -116,18 +116,7 @@ fn location_key(loc: &AstSourceLocation) -> String {
 // ---- AST to diagnostics SourceLocation conversion ----
 
 fn ast_to_diag_loc(loc: &AstSourceLocation) -> DiagSourceLocation {
-    DiagSourceLocation {
-        start: DiagPosition {
-            line: loc.start.line,
-            column: loc.start.column,
-            index: loc.start.index,
-        },
-        end: DiagPosition {
-            line: loc.end.line,
-            column: loc.end.column,
-            index: loc.end.index,
-        },
-    }
+    loc.to_hir()
 }
 
 // ---- Error reporting ----

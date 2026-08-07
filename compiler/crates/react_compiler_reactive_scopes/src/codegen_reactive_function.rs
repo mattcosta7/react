@@ -13,7 +13,6 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use react_compiler_ast::common::BaseNode;
-use react_compiler_ast::common::Position as AstPosition;
 use react_compiler_ast::common::RawNode;
 use react_compiler_ast::common::SourceLocation as AstSourceLocation;
 use react_compiler_ast::expressions::ArrowFunctionBody;
@@ -1310,6 +1309,10 @@ fn codegen_for_in(
     let iterable_collection = &instructions[0];
     let iterable_item = &instructions[1];
     let instr_value = get_instruction_value(&iterable_item.value)?;
+    // The declaration materializes the loop's binding, so it inherits the
+    // location of the iterable item it destructures, matching TS
+    // `createVariableDeclaration(iterableItem.value.loc, ...)`.
+    let item_loc = instr_value.loc().copied();
     let (lval, var_decl_kind) = extract_for_in_of_lval(cx, instr_value, "for..in", loc)?;
     let right = codegen_instruction_value_to_expression(cx, &iterable_collection.value)?;
     let body = codegen_block(cx, loop_block)?;
@@ -1317,7 +1320,7 @@ fn codegen_for_in(
         base: base_node_with_loc("ForInStatement", loc),
         left: Box::new(
             react_compiler_ast::statements::ForInOfLeft::VariableDeclaration(VariableDeclaration {
-                base: BaseNode::typed("VariableDeclaration"),
+                base: base_node_with_loc("VariableDeclaration", item_loc),
                 declarations: vec![VariableDeclarator {
                     base: BaseNode::typed("VariableDeclarator"),
                     id: lval,
@@ -1386,6 +1389,9 @@ fn codegen_for_of(
     }
     let iterable_item = &test_instrs[1];
     let instr_value = get_instruction_value(&iterable_item.value)?;
+    // See `codegen_for_in`: the binding declaration inherits the iterable
+    // item's location, matching TS `createVariableDeclaration(iterableItem.value.loc, ...)`.
+    let item_loc = instr_value.loc().copied();
     let (lval, var_decl_kind) = extract_for_in_of_lval(cx, instr_value, "for..of", loc)?;
 
     let right = codegen_place_to_expression(cx, collection)?;
@@ -1394,7 +1400,7 @@ fn codegen_for_of(
         base: base_node_with_loc("ForOfStatement", loc),
         left: Box::new(
             react_compiler_ast::statements::ForInOfLeft::VariableDeclaration(VariableDeclaration {
-                base: BaseNode::typed("VariableDeclaration"),
+                base: base_node_with_loc("VariableDeclaration", item_loc),
                 declarations: vec![VariableDeclarator {
                     base: BaseNode::typed("VariableDeclarator"),
                     id: lval,
@@ -2984,23 +2990,29 @@ fn codegen_jsx_attribute(
     attr: &JsxAttribute,
 ) -> Result<JSXAttributeItem, CompilerError> {
     match attr {
-        JsxAttribute::Attribute { name, place } => {
+        JsxAttribute::Attribute {
+            name,
+            name_loc,
+            place,
+        } => {
             let prop_name = if name.contains(':') {
                 let parts: Vec<&str> = name.splitn(2, ':').collect();
                 JSXAttributeName::JSXNamespacedName(JSXNamespacedName {
-                    base: BaseNode::typed("JSXNamespacedName"),
+                    base: base_node_with_loc("JSXNamespacedName", *name_loc),
                     namespace: JSXIdentifier {
-                        base: BaseNode::typed("JSXIdentifier"),
+                        base: base_node_with_loc("JSXIdentifier", *name_loc),
                         name: parts[0].to_string(),
                     },
                     name: JSXIdentifier {
-                        base: BaseNode::typed("JSXIdentifier"),
+                        base: base_node_with_loc("JSXIdentifier", *name_loc),
                         name: parts[1].to_string(),
                     },
                 })
             } else {
                 JSXAttributeName::JSXIdentifier(JSXIdentifier {
-                    base: BaseNode::typed("JSXIdentifier"),
+                    // The name's own location. The TS backend uses the
+                    // attribute *value*'s location here instead.
+                    base: base_node_with_loc("JSXIdentifier", *name_loc),
                     name: name.clone(),
                 })
             };
@@ -3326,22 +3338,11 @@ fn codegen_place(cx: &mut Context, place: &Place) -> Result<ExpressionOrJsxText,
         ));
     }
     let mut ast_ident = convert_identifier(place.identifier, cx.env)?;
-    // Override identifier loc with place.loc, matching TS: identifier.loc = place.loc
+    // Override identifier loc with place.loc, matching TS: identifier.loc = place.loc.
+    // Identifiers get the location of the specific Place they reference rather
+    // than the enclosing expression's, so source maps resolve each reference.
     if let Some(loc) = place.loc {
-        ast_ident.base.loc = Some(AstSourceLocation {
-            start: AstPosition {
-                line: loc.start.line,
-                column: loc.start.column,
-                index: None,
-            },
-            end: AstPosition {
-                line: loc.end.line,
-                column: loc.end.column,
-                index: None,
-            },
-            filename: None,
-            identifier_name: None,
-        });
+        ast_ident.base.loc = Some(AstSourceLocation::from_hir(&loc));
     }
     Ok(ExpressionOrJsxText::Expression(Expression::Identifier(
         ast_ident,
@@ -3552,27 +3553,20 @@ fn convert_update_operator(op: &react_compiler_hir::UpdateOperator) -> AstUpdate
 // =============================================================================
 
 /// Create a BaseNode with the given type name and optional source location.
-/// Converts from the diagnostics SourceLocation (line, column) to the AST
-/// SourceLocation format. This is critical for Babel's `retainLines: true`
-/// option to insert blank lines at correct positions.
+///
+/// Converts from the HIR `SourceLocation` to the AST `SourceLocation` format via
+/// the single shared conversion helper, preserving line, column, byte index and
+/// filename. Full provenance is what lets Babel emit an accurate source map for
+/// the compiled output (and what `retainLines: true` uses to place blank lines).
+///
+/// A `None` location means "compiler-generated": the node stays unmapped rather
+/// than borrowing a nearby user location, so generated frames never blame user
+/// code.
 fn base_node_with_loc(type_name: &str, loc: Option<DiagSourceLocation>) -> BaseNode {
     match loc {
         Some(loc) => BaseNode {
             node_type: Some(type_name.to_string()),
-            loc: Some(AstSourceLocation {
-                start: AstPosition {
-                    line: loc.start.line,
-                    column: loc.start.column,
-                    index: loc.start.index,
-                },
-                end: AstPosition {
-                    line: loc.end.line,
-                    column: loc.end.column,
-                    index: loc.end.index,
-                },
-                filename: None,
-                identifier_name: None,
-            }),
+            loc: Some(AstSourceLocation::from_hir(&loc)),
             ..Default::default()
         },
         None => BaseNode::typed(type_name),
@@ -3601,12 +3595,15 @@ fn make_identifier_with_loc(name: &str, loc: Option<DiagSourceLocation>) -> AstI
 
 fn make_var_declarator(id: PatternLike, init: Option<Expression>) -> VariableDeclarator {
     // Reconstruct VariableDeclarator.loc from id.loc.start and init.loc.end,
-    // matching TS createVariableDeclarator behavior for retainLines support.
+    // matching TS createVariableDeclarator. The declarator's own location is not
+    // preserved in the HIR, but the span between the pattern and the initializer
+    // reproduces it exactly. Matching TS, the location is only reconstructed when
+    // there is no initializer or the initializer itself carries a location —
+    // otherwise the declarator stays unmapped rather than reporting a span that
+    // ends where the pattern ends.
     let loc = get_pattern_loc(&id).and_then(|id_loc| {
         let end = match &init {
-            Some(expr) => get_expression_loc(expr)
-                .map(|l| l.end.clone())
-                .unwrap_or_else(|| id_loc.end.clone()),
+            Some(expr) => get_expression_loc(expr)?.end.clone(),
             None => id_loc.end.clone(),
         };
         Some(AstSourceLocation {
@@ -3680,21 +3677,13 @@ fn get_expression_loc(expr: &Expression) -> Option<&AstSourceLocation> {
 
 /// Apply a source location to an ExpressionOrJsxText value, matching the TS behavior
 /// where `value.loc = instrValue.loc` is set at the end of codegenInstructionValue.
+///
+/// Only the materialized root receives the instruction's location; children keep
+/// whatever provenance they were built with. Smearing one location across an
+/// entire generated subtree would make every inner frame report the same
+/// position.
 fn apply_loc_to_value(value: &mut ExpressionOrJsxText, loc: DiagSourceLocation) {
-    let ast_loc = AstSourceLocation {
-        start: AstPosition {
-            line: loc.start.line,
-            column: loc.start.column,
-            index: None,
-        },
-        end: AstPosition {
-            line: loc.end.line,
-            column: loc.end.column,
-            index: None,
-        },
-        filename: None,
-        identifier_name: None,
-    };
+    let ast_loc = AstSourceLocation::from_hir(&loc);
     match value {
         ExpressionOrJsxText::Expression(expr) => {
             apply_loc_to_expression(expr, ast_loc);
@@ -3785,8 +3774,12 @@ fn codegen_primitive_value(value: &PrimitiveValue, loc: Option<DiagSourceLocatio
                     base: base_node_with_loc("UnaryExpression", loc),
                     operator: AstUnaryOperator::Neg,
                     prefix: true,
+                    // Only the materialized root carries the source location; the
+                    // negated literal is scaffolding introduced to work around a
+                    // Babel codegen bug, so it stays unmapped (as in the TS port,
+                    // which builds it with a bare `t.numericLiteral`).
                     argument: Box::new(Expression::NumericLiteral(NumericLiteral {
-                        base: base_node_with_loc("NumericLiteral", loc),
+                        base: BaseNode::typed("NumericLiteral"),
                         value: -f,
                         extra: None,
                     })),
@@ -3944,18 +3937,7 @@ fn get_statement_loc(stmt: &Statement) -> Option<DiagSourceLocation> {
         Statement::EmptyStatement(s) => &s.base,
         _ => return None,
     };
-    base.loc.as_ref().map(|loc| DiagSourceLocation {
-        start: react_compiler_diagnostics::Position {
-            line: loc.start.line,
-            column: loc.start.column,
-            index: loc.start.index,
-        },
-        end: react_compiler_diagnostics::Position {
-            line: loc.end.line,
-            column: loc.end.column,
-            index: loc.end.index,
-        },
-    })
+    base.loc.as_ref().map(AstSourceLocation::to_hir)
 }
 
 fn compare_scope_dependency(
@@ -4009,7 +3991,11 @@ fn ident_sort_key(id: IdentifierId, env: &Environment) -> String {
 fn jsx_tag_loc(tag: &JsxTag) -> Option<DiagSourceLocation> {
     match tag {
         JsxTag::Place(p) => p.loc,
-        JsxTag::Builtin(_) => None,
+        // The builtin tag carries the location of the tag name itself, which is
+        // the construct this identifier represents. The TS backend uses the
+        // whole JSX element's location here instead, which smears the element's
+        // span over the tag name.
+        JsxTag::Builtin(b) => b.loc,
     }
 }
 

@@ -1199,8 +1199,16 @@ pub enum JsxTag {
 
 #[derive(Debug, Clone)]
 pub enum JsxAttribute {
-    SpreadAttribute { argument: Place },
-    Attribute { name: String, place: Place },
+    SpreadAttribute {
+        argument: Place,
+    },
+    Attribute {
+        name: String,
+        /// Location of the attribute *name* in source. Distinct from
+        /// `place.loc`, which locates the attribute's *value*.
+        name_loc: Option<SourceLocation>,
+        place: Place,
+    },
 }
 
 // =============================================================================

@@ -54,18 +54,7 @@ struct IdentifierLocVisitor {
 }
 
 fn convert_loc(loc: &react_compiler_ast::common::SourceLocation) -> SourceLocation {
-    SourceLocation {
-        start: react_compiler_hir::Position {
-            line: loc.start.line,
-            column: loc.start.column,
-            index: loc.start.index,
-        },
-        end: react_compiler_hir::Position {
-            line: loc.end.line,
-            column: loc.end.column,
-            index: loc.end.index,
-        },
-    }
+    loc.to_hir()
 }
 
 impl IdentifierLocVisitor {
@@ -161,6 +150,10 @@ impl IdentifierLocVisitor {
                 column: end.get("column")?.as_u64()? as u32,
                 index: end.get("index").and_then(|i| i.as_u64()).map(|i| i as u32),
             },
+            filename: loc
+                .get("filename")
+                .and_then(|f| f.as_str())
+                .map(react_compiler_diagnostics::SourceFilename::new),
         })
     }
 }

@@ -3,7 +3,56 @@ pub mod js_string;
 
 pub use js_string::JsString;
 
-use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
+
+use rustc_hash::FxHashSet;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// An interned source filename.
+///
+/// `SourceLocation` is `Copy` and is threaded through every IR in the compiler,
+/// so the filename cannot be an owned `String`. The set of distinct filenames a
+/// process observes is bounded by the number of modules it compiles, so they
+/// are interned once and referenced as `&'static str` from then on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SourceFilename(&'static str);
+
+impl SourceFilename {
+    pub fn new(name: &str) -> Self {
+        static FILENAMES: OnceLock<Mutex<FxHashSet<&'static str>>> = OnceLock::new();
+        let filenames = FILENAMES.get_or_init(|| Mutex::new(FxHashSet::default()));
+        let mut filenames = filenames.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(existing) = filenames.get(name) {
+            return Self(existing);
+        }
+        let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+        filenames.insert(leaked);
+        Self(leaked)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for SourceFilename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Serialize for SourceFilename {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceFilename {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(Self::new(&name))
+    }
+}
 
 /// Error categories matching the TS ErrorCategory enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,10 +145,41 @@ pub struct CompilerSuggestion {
 /// Source location (matches Babel's SourceLocation format)
 /// This is the HIR source location, separate from AST's BaseNode location.
 /// GeneratedSource is represented as None.
+///
+/// Locations carry the full provenance of the source construct they came from:
+/// start/end line and column, byte index, and the originating filename. Codegen
+/// copies this straight onto the Babel AST nodes it materializes so that Babel
+/// can emit accurate source maps for the compiled output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceLocation {
     pub start: Position,
     pub end: Position,
+    /// The source file this location came from, as reported by the parser's
+    /// `sourceFilename` option. Skipped during serialization to keep the
+    /// existing logger/diagnostic payload shapes unchanged.
+    #[serde(default, skip_serializing)]
+    pub filename: Option<SourceFilename>,
+}
+
+impl SourceLocation {
+    /// Create a location without filename provenance. Prefer carrying the
+    /// filename through from the original AST node whenever one is available.
+    pub fn new(start: Position, end: Position) -> Self {
+        Self {
+            start,
+            end,
+            filename: None,
+        }
+    }
+
+    /// Create a location spanning `start`..`end` with the given filename.
+    pub fn with_filename(start: Position, end: Position, filename: Option<SourceFilename>) -> Self {
+        Self {
+            start,
+            end,
+            filename,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -454,5 +534,91 @@ pub fn format_category_heading(category: ErrorCategory) -> &'static str {
         ErrorCategory::Invariant => "Invariant",
         ErrorCategory::Todo => "Todo",
         _ => "Error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn position(line: u32, column: u32) -> Position {
+        Position {
+            line,
+            column,
+            index: None,
+        }
+    }
+
+    #[test]
+    fn interning_returns_the_same_pointer_for_equal_names() {
+        let a = SourceFilename::new("src/Interned.jsx");
+        let b = SourceFilename::new("src/Interned.jsx");
+
+        assert_eq!(a, b);
+        assert!(std::ptr::eq(a.as_str(), b.as_str()));
+    }
+
+    #[test]
+    fn distinct_names_stay_distinct() {
+        let a = SourceFilename::new("src/One.jsx");
+        let b = SourceFilename::new("src/Two.jsx");
+
+        assert_ne!(a, b);
+        assert_eq!(a.as_str(), "src/One.jsx");
+        assert_eq!(b.as_str(), "src/Two.jsx");
+    }
+
+    /// `SourceLocation` is used as a map key to deduplicate diagnostics (see
+    /// `validate_hooks_usage`), and `filename` participates in `Eq`/`Hash`.
+    /// Two locations at the same line/column in *different* files are therefore
+    /// distinct keys, which is what makes that dedup correct across files.
+    #[test]
+    fn filename_participates_in_equality_and_hashing() {
+        let same_position = || (position(3, 7), position(3, 19));
+
+        let (start, end) = same_position();
+        let in_a = SourceLocation::with_filename(start, end, Some(SourceFilename::new("a.jsx")));
+        let (start, end) = same_position();
+        let in_b = SourceLocation::with_filename(start, end, Some(SourceFilename::new("b.jsx")));
+        let (start, end) = same_position();
+        let unattributed = SourceLocation::new(start, end);
+
+        assert_ne!(in_a, in_b);
+        assert_ne!(in_a, unattributed);
+
+        let mut set = FxHashSet::default();
+        set.insert(in_a);
+        set.insert(in_b);
+        set.insert(unattributed);
+        assert_eq!(set.len(), 3);
+
+        let (start, end) = same_position();
+        let in_a_again =
+            SourceLocation::with_filename(start, end, Some(SourceFilename::new("a.jsx")));
+        assert_eq!(in_a, in_a_again);
+        assert!(!set.insert(in_a_again));
+    }
+
+    /// `filename` is deserialized but deliberately not serialized, so that
+    /// logger and diagnostic payload shapes are unchanged.
+    #[test]
+    fn filename_is_not_serialized_but_is_accepted_on_input() {
+        let loc = SourceLocation::with_filename(
+            position(1, 0),
+            position(1, 4),
+            Some(SourceFilename::new("src/Skipped.jsx")),
+        );
+
+        let json = serde_json::to_string(&loc).expect("serializes");
+        assert!(!json.contains("filename"), "unexpected payload: {json}");
+
+        let parsed: SourceLocation = serde_json::from_str(
+            r#"{"start":{"line":1,"column":0},"end":{"line":1,"column":4},"filename":"src/Parsed.jsx"}"#,
+        )
+        .expect("deserializes");
+        assert_eq!(
+            parsed.filename.map(|f| f.as_str().to_string()),
+            Some("src/Parsed.jsx".to_string())
+        );
     }
 }

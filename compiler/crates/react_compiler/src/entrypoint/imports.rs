@@ -20,9 +20,7 @@ use react_compiler_ast::statements::{
     Statement, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
 };
 use react_compiler_ast::{Program, SourceType};
-use react_compiler_diagnostics::{
-    CompilerError, CompilerErrorDetail, ErrorCategory, Position, SourceLocation,
-};
+use react_compiler_diagnostics::{CompilerError, CompilerErrorDetail, ErrorCategory};
 
 use super::compile_result::{DebugLogEntry, LoggerEvent, OrderedLogItem};
 use super::plugin_options::{CompilerTarget, PluginOptions};
@@ -290,18 +288,7 @@ pub fn validate_restricted_imports(
                     "Bailing out due to blocklisted import",
                 )
                 .with_description(format!("Import from module {}", import.source.value));
-                detail.loc = import.base.loc.as_ref().map(|loc| SourceLocation {
-                    start: Position {
-                        line: loc.start.line,
-                        column: loc.start.column,
-                        index: loc.start.index,
-                    },
-                    end: Position {
-                        line: loc.end.line,
-                        column: loc.end.column,
-                        index: loc.end.index,
-                    },
-                });
+                detail.loc = import.base.loc.as_ref().map(|loc| loc.to_hir());
                 error.push_error_detail(detail);
             }
         }

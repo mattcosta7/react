@@ -15,7 +15,6 @@ use react_compiler_ast::visitor::Visitor;
 use react_compiler_diagnostics::CompilerError;
 use react_compiler_diagnostics::CompilerErrorDetail;
 use react_compiler_diagnostics::ErrorCategory;
-use react_compiler_diagnostics::Position;
 use react_compiler_diagnostics::SourceLocation;
 use react_compiler_hir::environment::Environment;
 
@@ -234,18 +233,7 @@ fn walk_lval_for_reassignment(
 }
 
 fn convert_loc(loc: &react_compiler_ast::common::SourceLocation) -> SourceLocation {
-    SourceLocation {
-        start: Position {
-            line: loc.start.line,
-            column: loc.start.column,
-            index: loc.start.index,
-        },
-        end: Position {
-            line: loc.end.line,
-            column: loc.end.column,
-            index: loc.end.index,
-        },
-    }
+    loc.to_hir()
 }
 
 fn convert_opt_loc(

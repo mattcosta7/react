@@ -846,7 +846,7 @@ fn generate_instruction_types(
         InstructionValue::JsxExpression { props, .. } => {
             if unifier.enable_treat_ref_like_identifiers_as_refs {
                 for prop in props {
-                    if let JsxAttribute::Attribute { name, place } = prop {
+                    if let JsxAttribute::Attribute { name, place, .. } = prop {
                         if name == "ref" {
                             let ref_type = get_type(place.identifier, identifiers);
                             unifier.unify(

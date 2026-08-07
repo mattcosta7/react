@@ -948,7 +948,7 @@ impl<'a> PrintFormatter<'a> {
                 self.indent();
                 for (i, prop) in props.iter().enumerate() {
                     match prop {
-                        crate::JsxAttribute::Attribute { name, place } => {
+                        crate::JsxAttribute::Attribute { name, place, .. } => {
                             self.line(&format!("[{}] JsxAttribute {{", i));
                             self.indent();
                             self.line(&format!("name: \"{}\"", name));

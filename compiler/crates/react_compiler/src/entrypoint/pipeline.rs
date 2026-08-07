@@ -1192,7 +1192,13 @@ pub fn compile_outlined_fn(
 
     // Build a FunctionDeclaration from the codegen output
     let mut outlined_decl = react_compiler_ast::statements::FunctionDeclaration {
-        base: react_compiler_ast::common::BaseNode::typed("FunctionDeclaration"),
+        base: {
+            // Preserve the original function's location across the re-lowering
+            // so the recompiled outlined function keeps its provenance.
+            let mut base = react_compiler_ast::common::BaseNode::typed("FunctionDeclaration");
+            base.loc = react_compiler_ast::common::hir_loc_to_ast(codegen_fn.loc);
+            base
+        },
         id: codegen_fn.id.take(),
         params: std::mem::take(&mut codegen_fn.params),
         body: std::mem::replace(

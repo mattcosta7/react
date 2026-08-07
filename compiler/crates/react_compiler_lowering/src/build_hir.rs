@@ -26,20 +26,10 @@ use crate::identifier_loc_index::build_identifier_loc_index;
 // Source location conversion
 // =============================================================================
 
-/// Convert an AST SourceLocation to an HIR SourceLocation.
+/// Convert an AST SourceLocation to an HIR SourceLocation, preserving line,
+/// column, byte index, and filename.
 fn convert_loc(loc: &react_compiler_ast::common::SourceLocation) -> SourceLocation {
-    SourceLocation {
-        start: Position {
-            line: loc.start.line,
-            column: loc.start.column,
-            index: loc.start.index,
-        },
-        end: Position {
-            line: loc.end.line,
-            column: loc.end.column,
-            index: loc.end.index,
-        },
-    }
+    loc.to_hir()
 }
 
 /// Convert an optional AST SourceLocation to an optional HIR SourceLocation.
@@ -1960,7 +1950,7 @@ fn lower_expression(
                     }
                     JSXAttributeItem::JSXAttribute(attr) => {
                         // Get the attribute name
-                        let prop_name = match &attr.name {
+                        let (prop_name, prop_name_loc) = match &attr.name {
                             JSXAttributeName::JSXIdentifier(id) => {
                                 let name = &id.name;
                                 if name.contains(':') {
@@ -1975,11 +1965,12 @@ fn lower_expression(
                                         suggestions: None,
                                     })?;
                                 }
-                                name.clone()
+                                (name.clone(), convert_opt_loc(&id.base.loc))
                             }
-                            JSXAttributeName::JSXNamespacedName(ns) => {
-                                format!("{}:{}", ns.namespace.name, ns.name.name)
-                            }
+                            JSXAttributeName::JSXNamespacedName(ns) => (
+                                format!("{}:{}", ns.namespace.name, ns.name.name),
+                                convert_opt_loc(&ns.base.loc),
+                            ),
                         };
 
                         // Get the attribute value
@@ -2039,6 +2030,7 @@ fn lower_expression(
 
                         props.push(JsxAttribute::Attribute {
                             name: prop_name,
+                            name_loc: prop_name_loc,
                             place: value,
                         });
                     }

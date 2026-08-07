@@ -277,20 +277,7 @@ pub fn suppressions_to_compiler_error(suppressions: &[SuppressionRange]) -> Comp
         }]);
 
         // Add error detail with location info
-        let loc = suppression.disable_comment.loc.as_ref().map(|l| {
-            react_compiler_diagnostics::SourceLocation {
-                start: react_compiler_diagnostics::Position {
-                    line: l.start.line,
-                    column: l.start.column,
-                    index: l.start.index,
-                },
-                end: react_compiler_diagnostics::Position {
-                    line: l.end.line,
-                    column: l.end.column,
-                    index: l.end.index,
-                },
-            }
-        });
+        let loc = suppression.disable_comment.loc.as_ref().map(|l| l.to_hir());
 
         diagnostic = diagnostic.with_detail(CompilerDiagnosticDetail::Error {
             loc,
