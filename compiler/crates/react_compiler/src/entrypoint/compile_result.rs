@@ -24,6 +24,9 @@ pub struct LoggerSourceLocation {
 pub struct LoggerPosition {
     pub line: u32,
     pub column: u32,
+    /// UTF-16 code unit offset. This struct is the JS wire format, so the value
+    /// stays in the unit JS indexes strings by rather than being resolved to a
+    /// UTF-8 byte offset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
 }

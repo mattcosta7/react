@@ -1234,12 +1234,12 @@ fn to_logger_loc(
         start: LoggerPosition {
             line: loc.start.line,
             column: loc.start.column,
-            index: loc.start.index,
+            index: loc.start.index.map(|i| i.get()),
         },
         end: LoggerPosition {
             line: loc.end.line,
             column: loc.end.column,
-            index: loc.end.index,
+            index: loc.end.index.map(|i| i.get()),
         },
         filename: filename.map(|s| s.to_string()),
         identifier_name: loc.identifier_name.clone(),
@@ -1252,12 +1252,12 @@ fn diag_loc_to_logger_loc(loc: &SourceLocation, filename: Option<&str>) -> Logge
         start: LoggerPosition {
             line: loc.start.line,
             column: loc.start.column,
-            index: loc.start.index,
+            index: loc.start.index.map(|i| i.get()),
         },
         end: LoggerPosition {
             line: loc.end.line,
             column: loc.end.column,
-            index: loc.end.index,
+            index: loc.end.index.map(|i| i.get()),
         },
         filename: filename.map(|s| s.to_string()),
         identifier_name: None,

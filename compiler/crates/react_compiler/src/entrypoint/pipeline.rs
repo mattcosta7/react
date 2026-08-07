@@ -1867,12 +1867,12 @@ fn log_errors_as_events(errors: &CompilerError, context: &mut ProgramContext) {
                                     start: LoggerPosition {
                                         line: l.start.line,
                                         column: l.start.column,
-                                        index: l.start.index,
+                                        index: l.start.index.map(|i| i.get()),
                                     },
                                     end: LoggerPosition {
                                         line: l.end.line,
                                         column: l.end.column,
-                                        index: l.end.index,
+                                        index: l.end.index.map(|i| i.get()),
                                     },
                                     filename: source_filename.clone(),
                                     identifier_name: identifier_name.clone(),

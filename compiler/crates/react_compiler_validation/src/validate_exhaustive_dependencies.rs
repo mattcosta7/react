@@ -1474,7 +1474,10 @@ fn validate_dependencies(
         );
         Some(CompilerSuggestion {
             op: CompilerSuggestionOperation::Replace,
-            range: (start_index as usize, end_index as usize),
+            // `range` is consumed by JS (the ESLint autofix applies it to a JS
+            // string), so it stays in UTF-16 code units rather than being
+            // resolved to UTF-8 byte offsets.
+            range: (start_index.get() as usize, end_index.get() as usize),
             description: "Update dependencies".to_string(),
             text: Some(text),
         })

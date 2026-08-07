@@ -142,14 +142,144 @@ pub struct CompilerSuggestion {
     pub text: Option<String>, // None for Remove operations
 }
 
+/// The unit a frontend measures source offsets in.
+///
+/// There is no single right answer, which is why this is explicit. JavaScript
+/// indexes strings in UTF-16 code units, so Babel's `loc.start.index`, ESLint
+/// fix ranges, and the `range` of [`CompilerSuggestion`] are all UTF-16. Rust's
+/// `str` is indexed in UTF-8 bytes, so a Rust-native parser reports those
+/// instead: swc's `swc_ecma_react_compiler` bridge fills [`Position::index`]
+/// with `BytePos` values directly.
+///
+/// The two coincide only for ASCII. Interpreting one as the other silently
+/// yields the wrong slice for any source containing non-ASCII text, and panics
+/// outright when an offset lands inside a multibyte character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum SourceOffsetEncoding {
+    /// UTF-16 code units, as reported by a JavaScript parser. The default,
+    /// because the Babel bridge is the frontend that supplies source text.
+    #[default]
+    Utf16CodeUnits,
+    /// UTF-8 bytes, as reported by a Rust-native parser (swc, oxc).
+    Utf8Bytes,
+}
+
+/// Source text paired with the offset encoding of the frontend that produced
+/// the AST for it.
+///
+/// Offsets are meaningless without knowing their unit, so the two travel
+/// together rather than letting a consumer assume.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceText<'a> {
+    text: &'a str,
+    encoding: SourceOffsetEncoding,
+}
+
+impl<'a> SourceText<'a> {
+    pub fn new(text: &'a str, encoding: SourceOffsetEncoding) -> Self {
+        Self { text, encoding }
+    }
+
+    pub fn text(&self) -> &'a str {
+        self.text
+    }
+
+    pub fn encoding(&self) -> SourceOffsetEncoding {
+        self.encoding
+    }
+}
+
+/// An offset into source text, in the unit its frontend reports.
+///
+/// The unit is deliberately *not* baked into this type, because it differs by
+/// frontend (see [`SourceOffsetEncoding`]). What the type does enforce is that
+/// you cannot index Rust source text with the raw value: resolving requires a
+/// [`SourceText`], which carries the encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SourceOffset(u32);
+
+impl SourceOffset {
+    pub fn new(offset: u32) -> Self {
+        Self(offset)
+    }
+
+    /// The raw offset, in whatever unit the frontend used. Use this only when
+    /// handing the value back to a consumer that shares that unit; never to
+    /// index a Rust `str`.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Resolve to a UTF-8 byte offset within `source`.
+    ///
+    /// Returns `None` if the offset is past the end of the text or does not
+    /// land on a character boundary, rather than panicking the way `str` range
+    /// indexing would.
+    pub fn to_byte_offset(self, source: SourceText<'_>) -> Option<usize> {
+        let target = self.0 as usize;
+        match source.encoding {
+            SourceOffsetEncoding::Utf8Bytes => (target <= source.text.len()
+                && source.text.is_char_boundary(target))
+            .then_some(target),
+            SourceOffsetEncoding::Utf16CodeUnits => {
+                let mut utf16 = 0usize;
+                for (byte_idx, ch) in source.text.char_indices() {
+                    match utf16.cmp(&target) {
+                        std::cmp::Ordering::Equal => return Some(byte_idx),
+                        // Stepped past the target: it pointed into a surrogate pair.
+                        std::cmp::Ordering::Greater => return None,
+                        std::cmp::Ordering::Less => {}
+                    }
+                    utf16 += ch.len_utf16();
+                }
+                (utf16 == target).then_some(source.text.len())
+            }
+        }
+    }
+
+    /// Build from a UTF-8 byte offset into `source`, expressed in that
+    /// source's encoding.
+    ///
+    /// This is what a Rust-native frontend needs when it must report an offset
+    /// in a unit other than its own. Returns `None` if the offset is out of
+    /// bounds or is not a character boundary.
+    pub fn from_byte_offset(byte_offset: usize, source: SourceText<'_>) -> Option<Self> {
+        if byte_offset > source.text.len() || !source.text.is_char_boundary(byte_offset) {
+            return None;
+        }
+        Some(Self(match source.encoding {
+            SourceOffsetEncoding::Utf8Bytes => byte_offset as u32,
+            SourceOffsetEncoding::Utf16CodeUnits => {
+                source.text[..byte_offset].encode_utf16().count() as u32
+            }
+        }))
+    }
+}
+
+impl std::fmt::Display for SourceOffset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Source location (matches Babel's SourceLocation format)
 /// This is the HIR source location, separate from AST's BaseNode location.
 /// GeneratedSource is represented as None.
 ///
 /// Locations carry the full provenance of the source construct they came from:
-/// start/end line and column, byte index, and the originating filename. Codegen
-/// copies this straight onto the Babel AST nodes it materializes so that Babel
+/// start/end line and column, offset, and the originating filename. Codegen
+/// copies this straight onto the AST nodes it materializes so that the printer
 /// can emit accurate source maps for the compiled output.
+///
+/// # Implementing a non-Babel frontend
+///
+/// The representation is printer-agnostic, but it is richer than what a
+/// Rust-native parser reports. swc (`Span { lo, hi }`) and oxc
+/// (`Span { start, end }`) carry only byte offsets, with no line, column, or
+/// filename, so such a frontend must resolve line/column itself and declare its
+/// offset unit via [`SourceOffsetEncoding`]. `None` continues to mean
+/// "generated", which every printer must render as an unmapped node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceLocation {
     pub start: Position,
@@ -180,15 +310,34 @@ impl SourceLocation {
             filename,
         }
     }
+
+    /// The text this location spans within `source`.
+    ///
+    /// Handles the offset-unit conversion the raw positions require, so callers
+    /// never index the source text directly. Returns `None` when either
+    /// endpoint is absent, the range is inverted, or an offset does not land on
+    /// a character boundary.
+    pub fn slice<'a>(&self, source: SourceText<'a>) -> Option<&'a str> {
+        let start = self.start.index?;
+        let end = self.end.index?;
+        if start > end {
+            return None;
+        }
+        let start = start.to_byte_offset(source)?;
+        let end = end.to_byte_offset(source)?;
+        source.text().get(start..end)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Position {
     pub line: u32,
     pub column: u32,
-    /// Byte offset in the source file. Preserved for logger event serialization.
+    /// Offset of this position in the source file, in the unit the frontend
+    /// reports. See [`SourceOffsetEncoding`] before using this to index source
+    /// text.
     #[serde(default, skip_serializing)]
-    pub index: Option<u32>,
+    pub index: Option<SourceOffset>,
 }
 
 /// Sentinel value for generated/synthetic source locations
@@ -620,5 +769,118 @@ mod tests {
             parsed.filename.map(|f| f.as_str().to_string()),
             Some("src/Parsed.jsx".to_string())
         );
+    }
+
+    fn span(start: u32, end: u32) -> SourceLocation {
+        SourceLocation::new(
+            Position {
+                line: 1,
+                column: start,
+                index: Some(SourceOffset::new(start)),
+            },
+            Position {
+                line: 1,
+                column: end,
+                index: Some(SourceOffset::new(end)),
+            },
+        )
+    }
+
+    /// Source as a JS frontend (Babel) reports it.
+    fn utf16(text: &str) -> SourceText<'_> {
+        SourceText::new(text, SourceOffsetEncoding::Utf16CodeUnits)
+    }
+
+    /// Source as a Rust-native frontend (swc, oxc) reports it.
+    fn utf8(text: &str) -> SourceText<'_> {
+        SourceText::new(text, SourceOffsetEncoding::Utf8Bytes)
+    }
+
+    /// The units coincide for ASCII, which is why treating one as the other
+    /// survives every ASCII test fixture.
+    #[test]
+    fn both_encodings_agree_for_ascii() {
+        let code = "const useEffect = 1;";
+        assert_eq!(span(6, 15).slice(utf16(code)), Some("useEffect"));
+        assert_eq!(span(6, 15).slice(utf8(code)), Some("useEffect"));
+        assert_eq!(SourceOffset::new(6).to_byte_offset(utf16(code)), Some(6));
+    }
+
+    /// A single non-ASCII character shifts every following byte offset, so the
+    /// same numeric offset means different things to the two frontends. Reading
+    /// a UTF-16 offset as bytes would yield " useEffec" here.
+    #[test]
+    fn encodings_diverge_for_non_ascii_source() {
+        // "é" is one UTF-16 code unit and two UTF-8 bytes.
+        let code = "const é = 1; useEffect();";
+        let byte_start = code.find("useEffect").expect("present");
+        assert_eq!(byte_start, 14);
+
+        assert_eq!(
+            SourceOffset::from_byte_offset(byte_start, utf16(code)),
+            Some(SourceOffset::new(13))
+        );
+        assert_eq!(
+            SourceOffset::from_byte_offset(byte_start, utf8(code)),
+            Some(SourceOffset::new(14))
+        );
+
+        assert_eq!(span(13, 22).slice(utf16(code)), Some("useEffect"));
+        assert_eq!(span(14, 23).slice(utf8(code)), Some("useEffect"));
+        // Each frontend's offsets are wrong when read in the other's unit.
+        assert_eq!(span(13, 22).slice(utf8(code)), Some(" useEffec"));
+    }
+
+    /// Astral characters are two UTF-16 code units and four UTF-8 bytes, so an
+    /// offset can point into the middle of a surrogate pair. That must be
+    /// `None` rather than a panic.
+    #[test]
+    fn surrogate_halves_and_interior_bytes_are_rejected() {
+        let code = "const a = '😀'; useEffect();";
+        let byte_start = code.find("useEffect").expect("present");
+
+        let offset = SourceOffset::from_byte_offset(byte_start, utf16(code)).expect("converts");
+        assert_eq!(offset.to_byte_offset(utf16(code)), Some(byte_start));
+
+        // The emoji starts at UTF-16 offset 11; offset 12 is its trailing
+        // surrogate, which is not a character boundary in UTF-8.
+        assert_eq!(SourceOffset::new(12).to_byte_offset(utf16(code)), None);
+        // Likewise byte 12 lands inside the emoji's 4-byte encoding.
+        assert_eq!(SourceOffset::new(12).to_byte_offset(utf8(code)), None);
+    }
+
+    /// Out-of-range and inverted inputs return `None` instead of panicking the
+    /// way `&code[start..end]` would.
+    #[test]
+    fn out_of_range_and_inverted_offsets_are_rejected() {
+        let code = "const a = 1;";
+        let len = code.len() as u32;
+
+        assert_eq!(
+            SourceOffset::new(len).to_byte_offset(utf16(code)),
+            Some(code.len())
+        );
+        assert_eq!(
+            SourceOffset::new(len).to_byte_offset(utf8(code)),
+            Some(code.len())
+        );
+        assert_eq!(SourceOffset::new(len + 1).to_byte_offset(utf16(code)), None);
+        assert_eq!(SourceOffset::new(len + 1).to_byte_offset(utf8(code)), None);
+        assert_eq!(span(9, 3).slice(utf16(code)), None);
+        assert_eq!(span(0, 999).slice(utf16(code)), None);
+        assert_eq!(SourceOffset::from_byte_offset(999, utf16(code)), None);
+    }
+
+    /// A Rust-native frontend reports UTF-8 byte spans natively, so resolving
+    /// them must be an identity that still validates boundaries.
+    #[test]
+    fn utf8_byte_spans_round_trip_in_both_encodings() {
+        let code = "const 日本 = 1; useEffect();";
+        for (byte_idx, _) in code.char_indices() {
+            for source in [utf16(code), utf8(code)] {
+                let offset = SourceOffset::from_byte_offset(byte_idx, source).expect("converts");
+                assert_eq!(offset.to_byte_offset(source), Some(byte_idx));
+            }
+        }
     }
 }

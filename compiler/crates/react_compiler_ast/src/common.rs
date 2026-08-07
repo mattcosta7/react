@@ -1,6 +1,6 @@
 use react_compiler_diagnostics::{
     Position as HirPosition, SourceFilename as HirSourceFilename,
-    SourceLocation as HirSourceLocation,
+    SourceLocation as HirSourceLocation, SourceOffset,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -105,8 +105,11 @@ where
 pub struct Position {
     pub line: u32,
     pub column: u32,
+    /// Offset of this position in the source file, in the unit the frontend
+    /// reports (UTF-16 code units from a JS parser, UTF-8 bytes from swc/oxc).
+    /// See [`SourceOffset`] before using this to index source text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index: Option<u32>,
+    pub index: Option<SourceOffset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +128,7 @@ pub struct SourceLocation {
 
 impl SourceLocation {
     /// Convert this Babel AST location into the HIR representation, preserving
-    /// line, column, byte index, and the originating filename.
+    /// line, column, UTF-16 offset, and the originating filename.
     ///
     /// This is the ingest direction: the compiler is driven as a Babel plugin,
     /// so locations start life on the Babel AST that Babel's parser produced.
@@ -273,12 +276,12 @@ mod tests {
             start: Position {
                 line: 12,
                 column: 4,
-                index: Some(211),
+                index: Some(SourceOffset::new(211)),
             },
             end: Position {
                 line: 12,
                 column: 27,
-                index: Some(234),
+                index: Some(SourceOffset::new(234)),
             },
             filename: Some("src/Component.jsx".to_string()),
             identifier_name: None,
@@ -295,10 +298,10 @@ mod tests {
 
         assert_eq!(hir.start.line, 12);
         assert_eq!(hir.start.column, 4);
-        assert_eq!(hir.start.index, Some(211));
+        assert_eq!(hir.start.index, Some(SourceOffset::new(211)));
         assert_eq!(hir.end.line, 12);
         assert_eq!(hir.end.column, 27);
-        assert_eq!(hir.end.index, Some(234));
+        assert_eq!(hir.end.index, Some(SourceOffset::new(234)));
         assert_eq!(
             hir.filename.map(|f| f.as_str().to_string()),
             Some("src/Component.jsx".to_string())

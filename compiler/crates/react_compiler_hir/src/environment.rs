@@ -62,6 +62,11 @@ pub struct Environment {
     // Source file code (for fast refresh hash computation)
     pub code: Option<String>,
 
+    // Unit that `SourceLocation` offsets are measured in. Defaults to what the
+    // Babel bridge reports; a Rust-native frontend (swc, oxc) that supplies
+    // `code` must set this to match the spans it produced.
+    pub source_offset_encoding: SourceOffsetEncoding,
+
     // Source file name (for instrumentation)
     pub filename: Option<String>,
 
@@ -126,6 +131,14 @@ impl Environment {
         Self::with_config(EnvironmentConfig::default())
     }
 
+    /// The source text together with the offset encoding it was parsed with,
+    /// which is what [`SourceLocation::slice`] needs to resolve a span.
+    pub fn source_text(&self) -> Option<SourceText<'_>> {
+        self.code
+            .as_deref()
+            .map(|code| SourceText::new(code, self.source_offset_encoding))
+    }
+
     /// Create a new Environment with the given configuration.
     ///
     /// Initializes the shape and global registries, registers custom hooks,
@@ -184,6 +197,7 @@ impl Environment {
             fn_type: ReactFunctionType::Other,
             output_mode: OutputMode::Client,
             code: None,
+            source_offset_encoding: SourceOffsetEncoding::default(),
             filename: None,
             instrument_fn_name: None,
             instrument_gating_name: None,
@@ -231,6 +245,7 @@ impl Environment {
             fn_type,
             output_mode: self.output_mode,
             code: self.code.clone(),
+            source_offset_encoding: self.source_offset_encoding,
             filename: self.filename.clone(),
             instrument_fn_name: self.instrument_fn_name.clone(),
             instrument_gating_name: self.instrument_gating_name.clone(),

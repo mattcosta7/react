@@ -23,7 +23,7 @@ use react_compiler_hir::visitors::{
 use react_compiler_hir::{
     ArrayElement, BlockId, Effect, EvaluationOrder, FunctionId, HirFunction, Identifier,
     IdentifierId, IdentifierName, InstructionValue, ParamPattern, PlaceOrSpread, ReactFunctionType,
-    ReturnVariant, SourceLocation, Type, is_set_state_type, is_use_effect_hook_type,
+    ReturnVariant, SourceLocation, SourceText, Type, is_set_state_type, is_use_effect_hook_type,
     is_use_ref_type, is_use_state_type,
 };
 
@@ -36,7 +36,7 @@ fn get_identifier_name_with_loc(
     id: IdentifierId,
     identifiers: &[Identifier],
     loc: &Option<SourceLocation>,
-    source_code: Option<&str>,
+    source_code: Option<SourceText<'_>>,
 ) -> Option<String> {
     let ident = &identifiers[id.0 as usize];
     match &ident.name {
@@ -57,41 +57,16 @@ fn get_identifier_name_with_loc(
             }
         }
     }
-    // Fall back to extracting from source code using UTF-16 code unit indices.
-    // Babel/JS positions use UTF-16 code unit offsets, but Rust strings are UTF-8,
-    // so we need to convert between the two.
+    // Fall back to extracting the identifier straight out of the source text.
+    // `slice` resolves the offsets in whatever unit this frontend reported.
     if let (Some(loc), Some(code)) = (loc, source_code) {
-        let start_utf16 = loc.start.index? as usize;
-        let end_utf16 = loc.end.index? as usize;
-        if start_utf16 < end_utf16 {
-            // Convert UTF-16 code unit offsets to UTF-8 byte offsets
-            let mut utf16_pos = 0usize;
-            let mut byte_start = None;
-            let mut byte_end = None;
-            for (byte_idx, ch) in code.char_indices() {
-                if utf16_pos == start_utf16 {
-                    byte_start = Some(byte_idx);
-                }
-                if utf16_pos == end_utf16 {
-                    byte_end = Some(byte_idx);
-                    break;
-                }
-                utf16_pos += ch.len_utf16();
-            }
-            // Handle end at the very end of string
-            if utf16_pos == end_utf16 && byte_end.is_none() {
-                byte_end = Some(code.len());
-            }
-            if let (Some(start), Some(end)) = (byte_start, byte_end) {
-                let slice = &code[start..end];
-                if !slice.is_empty()
-                    && slice
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-                {
-                    return Some(slice.to_string());
-                }
-            }
+        let slice = loc.slice(code)?;
+        if !slice.is_empty()
+            && slice
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        {
+            return Some(slice.to_string());
         }
     }
     None
@@ -1006,7 +981,7 @@ fn validate_effect(
                                     callee.identifier,
                                     identifiers,
                                     &callee.loc,
-                                    env.code.as_deref(),
+                                    env.source_text(),
                                 );
                                 effect_derived_set_state_calls.push(DerivedSetStateCall {
                                     callee_loc: callee.loc,

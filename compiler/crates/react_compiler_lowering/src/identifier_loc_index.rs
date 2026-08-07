@@ -16,6 +16,7 @@ use react_compiler_ast::statements::FunctionDeclaration;
 use react_compiler_ast::visitor::AstWalker;
 use react_compiler_ast::visitor::Visitor;
 use react_compiler_hir::SourceLocation;
+use react_compiler_hir::SourceOffset;
 
 use crate::FunctionNode;
 
@@ -143,12 +144,15 @@ impl IdentifierLocVisitor {
                 index: start
                     .get("index")
                     .and_then(|i| i.as_u64())
-                    .map(|i| i as u32),
+                    .map(|i| SourceOffset::new(i as u32)),
             },
             end: react_compiler_hir::Position {
                 line: end.get("line")?.as_u64()? as u32,
                 column: end.get("column")?.as_u64()? as u32,
-                index: end.get("index").and_then(|i| i.as_u64()).map(|i| i as u32),
+                index: end
+                    .get("index")
+                    .and_then(|i| i.as_u64())
+                    .map(|i| SourceOffset::new(i as u32)),
             },
             filename: loc
                 .get("filename")

@@ -15,6 +15,9 @@ pub use react_compiler_diagnostics::ErrorCategory;
 pub use react_compiler_diagnostics::GENERATED_SOURCE;
 pub use react_compiler_diagnostics::Position;
 pub use react_compiler_diagnostics::SourceLocation;
+pub use react_compiler_diagnostics::SourceOffset;
+pub use react_compiler_diagnostics::SourceOffsetEncoding;
+pub use react_compiler_diagnostics::SourceText;
 pub use reactive::*;
 use rustc_hash::FxBuildHasher;
 
