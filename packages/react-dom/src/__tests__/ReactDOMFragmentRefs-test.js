@@ -2975,7 +2975,7 @@ describe('FragmentRefs', () => {
 
       expect(() => {
         fragmentRef.current.scrollIntoView({block: 'start'});
-      }).toThrowError(
+      }).toThrow(
         'FragmentInstance.scrollIntoView() does not support ' +
           'scrollIntoViewOptions. Use the alignToTop boolean instead.',
       );
